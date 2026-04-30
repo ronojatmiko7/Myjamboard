@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Pen, Eraser, StickyNote, MousePointer2, Trash2, X, Plus, ChevronLeft, ChevronRight, Users, Loader2, Menu } from 'lucide-react';
+import { Pen, Eraser, StickyNote, MousePointer2, Trash2, X, Plus, ChevronLeft, ChevronRight, Users, Loader2, Menu, Link } from 'lucide-react';
 
 // --- YOUR PERSONAL CLOUD SYNC SETUP ---
 import { initializeApp } from 'firebase/app';
@@ -26,9 +26,10 @@ const getInitialBoardId = () => {
     const bId = params.get('b');
     if (bId) return bId;
   } catch (e) {
-    // Ignore URL errors in strict iframes
+    // Ignore URL errors
   }
-  return 'board-' + Math.random().toString(36).substring(2, 10);
+  // FIX: Instead of a random private board, default everyone to the main workspace
+  return 'main-workspace'; 
 };
 
 // --- Constants ---
@@ -87,8 +88,7 @@ function usePagination(user, boardId) {
 
   useEffect(() => {
     if (!user) return;
-    // Reset index when board changes
-    setCurrentIndex(0); 
+    setCurrentIndex(0); // Reset index when board changes
     
     return onSnapshot(doc(db, 'artifacts', boardId, 'public', 'data', 'metadata', 'board'), 
       (docSnap) => {
@@ -365,20 +365,8 @@ function IconButton({ icon, isActive, onClick, title, colorClass = "text-gray-50
 // ============================================================================
 
 export default function App() {
-  const [boardId, setBoardId] = useState(getInitialBoardId());
+  const [boardId] = useState(getInitialBoardId());
   const user = useFirebaseAuth();
-  
-  // Safely update the URL when boardId changes (if allowed by environment)
-  useEffect(() => {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get('b') !== boardId) {
-        window.history.replaceState(null, '', `?b=${boardId}`);
-      }
-    } catch (e) {
-      // Ignore in restricted iframes
-    }
-  }, [boardId]);
   
   const { pageIds, currentIndex, setCurrentIndex, addPage, deletePage } = usePagination(user, boardId);
   const currentPageId = pageIds[currentIndex] || 'default-page';
@@ -390,29 +378,48 @@ export default function App() {
   const [penColor, setPenColor] = useState(PEN_COLORS[0]);
   const [noteColor, setNoteColor] = useState(NOTE_COLORS[0]);
 
-  // Dashboard State
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [recentBoards, setRecentBoards] = useState([]);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   // Track boards in local storage
   useEffect(() => {
     const saved = JSON.parse(localStorage.getItem('my_jamboards') || '[]');
     if (!saved.find(b => b.id === boardId)) {
-      saved.unshift({ id: boardId, name: `Board ${saved.length + 1}`, date: Date.now() });
+      saved.unshift({ id: boardId, name: boardId === 'main-workspace' ? 'Main Workspace' : `Board ${saved.length + 1}`, date: Date.now() });
       localStorage.setItem('my_jamboards', JSON.stringify(saved));
     }
     setRecentBoards(saved);
   }, [boardId]);
 
+  // FIX: Hard page reload to guarantee the URL updates and syncs properly
   const handleNewBoard = () => {
     const newId = 'board-' + Math.random().toString(36).substring(2, 10);
-    setBoardId(newId);
-    setIsMenuOpen(false);
+    window.location.href = `?b=${newId}`;
   };
 
   const handleLoadBoard = (id) => {
-    setBoardId(id);
-    setIsMenuOpen(false);
+    window.location.href = `?b=${id}`;
+  };
+
+  const handleCopyLink = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('b', boardId);
+    
+    // Fallback for copying text if standard navigator fails
+    try {
+      navigator.clipboard.writeText(url.toString());
+    } catch (err) {
+      const textArea = document.createElement("textarea");
+      textArea.value = url.toString();
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textArea);
+    }
+    
+    setLinkCopied(true);
+    setTimeout(() => setLinkCopied(false), 2000);
   };
 
   const handleBackgroundClick = useCallback((e) => {
@@ -462,6 +469,17 @@ export default function App() {
            <div className={`w-3 h-3 rounded-full ${isSynced ? 'bg-green-500' : 'bg-yellow-400 animate-pulse'}`} />
            <span className="font-semibold text-gray-700">My Jamboard</span>
         </div>
+        
+        {/* NEW: Copy Link Button */}
+        <button 
+          onClick={handleCopyLink}
+          className="bg-white/90 backdrop-blur-md px-3 py-2.5 rounded-xl shadow-sm border border-gray-200 pointer-events-auto flex items-center gap-2 hover:bg-gray-50 transition-colors"
+        >
+           <Link size={16} className={linkCopied ? "text-green-500" : "text-blue-500"} />
+           <span className={`text-sm font-semibold ${linkCopied ? "text-green-600" : "text-gray-600"}`}>
+             {linkCopied ? "Copied!" : "Share"}
+           </span>
+        </button>
       </div>
 
       {/* Slide-out Sidebar */}
