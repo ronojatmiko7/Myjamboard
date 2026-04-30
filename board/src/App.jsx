@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Pen, Eraser, StickyNote, MousePointer2, Trash2, X, Plus, ChevronLeft, ChevronRight, Users, Loader2 } from 'lucide-react';
+import { Pen, Eraser, StickyNote, MousePointer2, Trash2, X, Plus, ChevronLeft, ChevronRight, Users, Loader2, Menu } from 'lucide-react';
 
 // --- YOUR PERSONAL CLOUD SYNC SETUP ---
 import { initializeApp } from 'firebase/app';
@@ -19,7 +19,17 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
-const APP_ID = 'my-jamboard';
+// --- Safely Get Initial Board ID ---
+const getInitialBoardId = () => {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const bId = params.get('b');
+    if (bId) return bId;
+  } catch (e) {
+    // Ignore URL errors in strict iframes
+  }
+  return 'board-' + Math.random().toString(36).substring(2, 10);
+};
 
 // --- Constants ---
 const PEN_COLORS = ['#000000', '#ef4444', '#3b82f6', '#22c55e', '#eab308'];
@@ -71,55 +81,69 @@ function useFirebaseAuth() {
   return user;
 }
 
-function usePagination(user) {
-  const [pageCount, setPageCount] = useState(1);
-  const [currentPage, setCurrentPage] = useState(0);
+function usePagination(user, boardId) {
+  const [pageIds, setPageIds] = useState(['default-page']);
+  const [currentIndex, setCurrentIndex] = useState(0);
 
   useEffect(() => {
     if (!user) return;
-    return onSnapshot(doc(db, 'artifacts', APP_ID, 'public', 'data', 'metadata', 'board'), 
+    // Reset index when board changes
+    setCurrentIndex(0); 
+    
+    return onSnapshot(doc(db, 'artifacts', boardId, 'public', 'data', 'metadata', 'board'), 
       (docSnap) => {
-        if (docSnap.exists()) setPageCount(docSnap.data().pages || 1);
-        else setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'metadata', 'board'), { pages: 1 });
+        if (docSnap.exists() && docSnap.data().pageIds) {
+          setPageIds(docSnap.data().pageIds);
+        } else {
+          setDoc(doc(db, 'artifacts', boardId, 'public', 'data', 'metadata', 'board'), { pageIds: ['default-page'] });
+        }
       },
       (err) => console.error("Pagination Sync Error:", err)
     );
-  }, [user]);
+  }, [user, boardId]);
 
   const addPage = useCallback(() => {
     if (!user) return;
-    const newCount = pageCount + 1;
-    setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'metadata', 'board'), { pages: newCount }, { merge: true });
-    setCurrentPage(newCount - 1);
-  }, [pageCount, user]);
+    const newId = 'page-' + crypto.randomUUID();
+    const newIds = [...pageIds, newId];
+    setDoc(doc(db, 'artifacts', boardId, 'public', 'data', 'metadata', 'board'), { pageIds: newIds }, { merge: true });
+    setCurrentIndex(newIds.length - 1);
+  }, [pageIds, user, boardId]);
 
-  return { pageCount, currentPage, setCurrentPage, addPage };
+  const deletePage = useCallback(() => {
+    if (!user || pageIds.length <= 1) return;
+    const newIds = pageIds.filter((_, i) => i !== currentIndex);
+    setDoc(doc(db, 'artifacts', boardId, 'public', 'data', 'metadata', 'board'), { pageIds: newIds }, { merge: true });
+    setCurrentIndex(Math.max(0, currentIndex - 1));
+  }, [pageIds, currentIndex, user, boardId]);
+
+  return { pageIds, currentIndex, setCurrentIndex, addPage, deletePage };
 }
 
-function useNotes(user, currentPage) {
+function useNotes(user, boardId, currentPageId) {
   const [notes, setNotes] = useState([]);
 
   useEffect(() => {
     if (!user) return;
-    return onSnapshot(collection(db, 'artifacts', APP_ID, 'public', 'data', 'notes'), 
+    return onSnapshot(collection(db, 'artifacts', boardId, 'public', 'data', 'notes'), 
       (snap) => setNotes(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
       (err) => console.error("Notes Sync Error:", err)
     );
-  }, [user]);
+  }, [user, boardId]);
 
-  const currentPageNotes = useMemo(() => notes.filter(n => n.pageIndex === currentPage), [notes, currentPage]);
+  const currentPageNotes = useMemo(() => notes.filter(n => n.pageId === currentPageId), [notes, currentPageId]);
 
   const addNote = useCallback((noteData) => {
-    if (user) setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'notes', crypto.randomUUID()), noteData);
-  }, [user]);
+    if (user) setDoc(doc(db, 'artifacts', boardId, 'public', 'data', 'notes', crypto.randomUUID()), noteData);
+  }, [user, boardId]);
   
   const updateNote = useCallback((id, updates) => {
-    if (user) setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'notes', id), updates, { merge: true });
-  }, [user]);
+    if (user) setDoc(doc(db, 'artifacts', boardId, 'public', 'data', 'notes', id), updates, { merge: true });
+  }, [user, boardId]);
   
   const deleteNote = useCallback((id) => {
-    if (user) deleteDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'notes', id));
-  }, [user]);
+    if (user) deleteDoc(doc(db, 'artifacts', boardId, 'public', 'data', 'notes', id));
+  }, [user, boardId]);
   
   const clearNotes = useCallback(() => {
     if (user) currentPageNotes.forEach(n => deleteNote(n.id));
@@ -128,34 +152,34 @@ function useNotes(user, currentPage) {
   return { notes: currentPageNotes, addNote, updateNote, deleteNote, clearNotes };
 }
 
-function useStrokes(user, currentPage) {
+function useStrokes(user, boardId, currentPageId) {
   const [strokes, setStrokes] = useState([]);
   const [isSynced, setIsSynced] = useState(false);
 
   useEffect(() => {
     if (!user) return;
-    return onSnapshot(collection(db, 'artifacts', APP_ID, 'public', 'data', 'strokes'), 
+    return onSnapshot(collection(db, 'artifacts', boardId, 'public', 'data', 'strokes'), 
       (snap) => { setStrokes(snap.docs.map(d => ({ id: d.id, ...d.data() }))); setIsSynced(true); },
       (err) => console.error("Strokes Sync Error:", err)
     );
-  }, [user]);
+  }, [user, boardId]);
 
   const currentPageStrokes = useMemo(() => 
-    strokes.filter(s => s.pageIndex === currentPage).sort((a, b) => a.timestamp - b.timestamp),
-  [strokes, currentPage]);
+    strokes.filter(s => s.pageId === currentPageId).sort((a, b) => a.timestamp - b.timestamp),
+  [strokes, currentPageId]);
 
   const addStroke = useCallback((strokeData) => {
-    if (user) setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'strokes', crypto.randomUUID()), strokeData);
-  }, [user]);
+    if (user) setDoc(doc(db, 'artifacts', boardId, 'public', 'data', 'strokes', crypto.randomUUID()), strokeData);
+  }, [user, boardId]);
   
   const clearStrokes = useCallback(() => {
-    if (user) currentPageStrokes.forEach(s => deleteDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'strokes', s.id)));
+    if (user) currentPageStrokes.forEach(s => deleteDoc(doc(db, 'artifacts', boardId, 'public', 'data', 'strokes', s.id)));
   }, [currentPageStrokes, user]);
 
   return { strokes: currentPageStrokes, isSynced, addStroke, clearStrokes };
 }
 
-const CanvasEngine = React.memo(({ strokes, currentTool, penColor, onStrokeComplete, currentPage }) => {
+const CanvasEngine = React.memo(({ strokes, currentTool, penColor, onStrokeComplete, currentPageId }) => {
   const canvasRef = useRef(null);
   const currentLineRef = useRef(null);
   const isDrawingRef = useRef(false);
@@ -210,7 +234,7 @@ const CanvasEngine = React.memo(({ strokes, currentTool, penColor, onStrokeCompl
     const rect = canvasRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left; const y = e.clientY - rect.top;
 
-    currentLineRef.current = { tool: toolRef.current, color: colorRef.current, pageIndex: currentPage, timestamp: Date.now(), points: [{ x, y }] };
+    currentLineRef.current = { tool: toolRef.current, color: colorRef.current, pageId: currentPageId, timestamp: Date.now(), points: [{ x, y }] };
     
     const ctx = canvasRef.current.getContext('2d');
     setupCtx(ctx, toolRef.current, colorRef.current);
@@ -336,22 +360,67 @@ function IconButton({ icon, isActive, onClick, title, colorClass = "text-gray-50
   );
 }
 
+// ============================================================================
+// MAIN APPLICATION LAYOUT
+// ============================================================================
+
 export default function App() {
+  const [boardId, setBoardId] = useState(getInitialBoardId());
   const user = useFirebaseAuth();
-  const { pageCount, currentPage, setCurrentPage, addPage } = usePagination(user);
-  const { notes, addNote, updateNote, deleteNote, clearNotes } = useNotes(user, currentPage);
-  const { strokes, isSynced, addStroke, clearStrokes } = useStrokes(user, currentPage);
+  
+  // Safely update the URL when boardId changes (if allowed by environment)
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('b') !== boardId) {
+        window.history.replaceState(null, '', `?b=${boardId}`);
+      }
+    } catch (e) {
+      // Ignore in restricted iframes
+    }
+  }, [boardId]);
+  
+  const { pageIds, currentIndex, setCurrentIndex, addPage, deletePage } = usePagination(user, boardId);
+  const currentPageId = pageIds[currentIndex] || 'default-page';
+
+  const { notes, addNote, updateNote, deleteNote, clearNotes } = useNotes(user, boardId, currentPageId);
+  const { strokes, isSynced, addStroke, clearStrokes } = useStrokes(user, boardId, currentPageId);
 
   const [currentTool, setCurrentTool] = useState('pen');
   const [penColor, setPenColor] = useState(PEN_COLORS[0]);
   const [noteColor, setNoteColor] = useState(NOTE_COLORS[0]);
 
+  // Dashboard State
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [recentBoards, setRecentBoards] = useState([]);
+
+  // Track boards in local storage
+  useEffect(() => {
+    const saved = JSON.parse(localStorage.getItem('my_jamboards') || '[]');
+    if (!saved.find(b => b.id === boardId)) {
+      saved.unshift({ id: boardId, name: `Board ${saved.length + 1}`, date: Date.now() });
+      localStorage.setItem('my_jamboards', JSON.stringify(saved));
+    }
+    setRecentBoards(saved);
+  }, [boardId]);
+
+  const handleNewBoard = () => {
+    const newId = 'board-' + Math.random().toString(36).substring(2, 10);
+    setBoardId(newId);
+    setIsMenuOpen(false);
+  };
+
+  const handleLoadBoard = (id) => {
+    setBoardId(id);
+    setIsMenuOpen(false);
+  };
+
   const handleBackgroundClick = useCallback((e) => {
     if (currentTool === 'sticky' && user) {
-      addNote({ x: e.clientX - 100, y: e.clientY - 100, text: '', color: noteColor, pageIndex: currentPage, timestamp: Date.now() });
+      addNote({ x: e.clientX - 100, y: e.clientY - 100, text: '', color: noteColor, pageId: currentPageId, timestamp: Date.now() });
       setCurrentTool('select');
     }
-  }, [currentTool, addNote, noteColor, currentPage, user]);
+  }, [currentTool, addNote, noteColor, currentPageId, user]);
 
   if (!user) {
     return (
@@ -364,10 +433,14 @@ export default function App() {
 
   return (
     <div className="relative w-full h-screen overflow-hidden bg-[#f8f9fa] font-sans selection:bg-blue-200" onPointerDown={handleBackgroundClick}>
+      
+      {/* 1. Pure Canvas Layer */}
       <CanvasEngine 
         strokes={strokes} currentTool={currentTool} penColor={penColor} 
-        currentPage={currentPage} onStrokeComplete={addStroke} 
+        currentPageId={currentPageId} onStrokeComplete={addStroke} 
       />
+
+      {/* 2. Sticky Notes Layer */}
       <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 20 }}>
         {notes.map(note => (
           <NoteItem 
@@ -376,19 +449,77 @@ export default function App() {
           />
         ))}
       </div>
-      <div className="absolute top-6 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur-md px-4 py-2 rounded-xl shadow-sm border border-gray-200 pointer-events-auto flex items-center gap-4 z-30">
-        <button onClick={() => setCurrentPage(p => Math.max(0, p - 1))} disabled={currentPage === 0} className="p-1 rounded-lg hover:bg-gray-100 disabled:opacity-30 transition-colors"><ChevronLeft size={20} /></button>
-        <span className="text-sm font-medium text-gray-600 min-w-[60px] text-center">{currentPage + 1} / {pageCount}</span>
-        <button onClick={() => setCurrentPage(p => Math.min(pageCount - 1, p + 1))} disabled={currentPage === pageCount - 1} className="p-1 rounded-lg hover:bg-gray-100 disabled:opacity-30 transition-colors"><ChevronRight size={20} /></button>
-        <div className="w-px h-6 bg-gray-200 mx-1" />
-        <button onClick={addPage} className="p-1 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors flex items-center gap-1 text-sm font-medium pr-2"><Plus size={18} /> Add</button>
+
+      {/* 3. Dashboard / Hamburger Menu */}
+      <div className="absolute top-6 left-6 z-40 flex items-center gap-2">
+        <button 
+          onClick={() => setIsMenuOpen(true)}
+          className="p-3 bg-white/90 backdrop-blur-md rounded-xl shadow-sm border border-gray-200 hover:bg-gray-50 transition-colors pointer-events-auto"
+        >
+          <Menu size={20} className="text-gray-700" />
+        </button>
+        <div className="bg-white/90 backdrop-blur-md px-4 py-2.5 rounded-xl shadow-sm border border-gray-200 pointer-events-auto flex items-center gap-2">
+           <div className={`w-3 h-3 rounded-full ${isSynced ? 'bg-green-500' : 'bg-yellow-400 animate-pulse'}`} />
+           <span className="font-semibold text-gray-700">My Jamboard</span>
+        </div>
       </div>
+
+      {/* Slide-out Sidebar */}
+      {isMenuOpen && (
+        <div className="fixed inset-0 z-50 flex pointer-events-auto">
+          <div className="w-72 bg-white h-full shadow-2xl flex flex-col animate-in slide-in-from-left duration-200">
+            <div className="p-5 flex justify-between items-center border-b">
+              <h2 className="font-bold text-lg text-gray-800">My Boards</h2>
+              <button onClick={() => setIsMenuOpen(false)} className="p-2 hover:bg-gray-100 rounded-full"><X size={20}/></button>
+            </div>
+            <div className="p-4 border-b bg-gray-50">
+              <button onClick={handleNewBoard} className="w-full py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 flex justify-center items-center gap-2 shadow-sm">
+                <Plus size={18} /> Create New Board
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {recentBoards.map(b => (
+                <button 
+                  key={b.id} 
+                  onClick={() => handleLoadBoard(b.id)} 
+                  className={`w-full text-left p-4 hover:bg-gray-50 border-b flex flex-col gap-1 transition-colors ${b.id === boardId ? 'bg-blue-50/50 border-l-4 border-l-blue-600' : 'border-l-4 border-l-transparent'}`}
+                >
+                  <div className="font-semibold text-gray-800">{b.name}</div>
+                  <div className="text-xs text-gray-500 font-medium">Last opened: {new Date(b.date).toLocaleDateString()}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex-1 bg-black/20 backdrop-blur-sm" onClick={() => setIsMenuOpen(false)}></div>
+        </div>
+      )}
+
+      {/* 4. Pagination UI */}
+      <div className="absolute top-6 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur-md px-3 py-2 rounded-xl shadow-sm border border-gray-200 pointer-events-auto flex items-center gap-2 z-30">
+        <button onClick={() => setCurrentIndex(p => Math.max(0, p - 1))} disabled={currentIndex === 0} className="p-1.5 rounded-lg hover:bg-gray-100 disabled:opacity-30 transition-colors"><ChevronLeft size={20} /></button>
+        <span className="text-sm font-semibold text-gray-600 min-w-[50px] text-center">{currentIndex + 1} / {pageIds.length}</span>
+        <button onClick={() => setCurrentIndex(p => Math.min(pageIds.length - 1, p + 1))} disabled={currentIndex === pageIds.length - 1} className="p-1.5 rounded-lg hover:bg-gray-100 disabled:opacity-30 transition-colors"><ChevronRight size={20} /></button>
+        <div className="w-px h-6 bg-gray-200 mx-1" />
+        <button onClick={addPage} className="p-1.5 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors flex items-center gap-1 text-sm font-bold pr-3"><Plus size={18} /> Add Frame</button>
+        
+        {/* Delete Page Button */}
+        {pageIds.length > 1 && (
+          <>
+            <div className="w-px h-6 bg-gray-200 mx-1" />
+            <button onClick={deletePage} title="Delete This Frame" className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors flex items-center gap-1 text-sm font-bold pr-2"><Trash2 size={18} /></button>
+          </>
+        )}
+      </div>
+
+      {/* 5. Toolbar UI */}
       <div className="absolute left-6 top-1/2 -translate-y-1/2 bg-white rounded-2xl shadow-xl border border-gray-200 p-2 flex flex-col gap-2 pointer-events-auto z-30">
         <IconButton icon={<MousePointer2 size={24} />} isActive={currentTool === 'select'} onClick={() => setCurrentTool('select')} title="Select" />
         <IconButton icon={<Pen size={24} />} isActive={currentTool === 'pen'} onClick={() => setCurrentTool('pen')} title="Pen" />
         <IconButton icon={<Eraser size={24} />} isActive={currentTool === 'eraser'} onClick={() => setCurrentTool('eraser')} title="Eraser" />
         <IconButton icon={<StickyNote size={24} />} isActive={currentTool === 'sticky'} onClick={() => setCurrentTool('sticky')} title="Sticky Note" />
+        
         <div className="w-full h-px bg-gray-100 my-1" />
+
         {(currentTool === 'pen' || currentTool === 'select') && (
           <div className="flex flex-col gap-2 p-1">
             {PEN_COLORS.map(color => (
@@ -396,6 +527,7 @@ export default function App() {
             ))}
           </div>
         )}
+
         {currentTool === 'sticky' && (
           <div className="flex flex-col gap-2 p-1">
             {NOTE_COLORS.map(color => (
@@ -403,16 +535,11 @@ export default function App() {
             ))}
           </div>
         )}
+
         <div className="w-full h-px bg-gray-100 my-1" />
         <IconButton icon={<Trash2 size={24} />} onClick={() => { clearNotes(); clearStrokes(); }} title="Clear Page" colorClass="text-red-500 hover:bg-red-50" />
       </div>
-      <div className="absolute top-6 left-6 bg-white/90 backdrop-blur-md px-4 py-2 rounded-xl shadow-sm border border-gray-200 pointer-events-auto flex items-center gap-4 z-30">
-        <div className="flex items-center gap-2">
-           <div className={`w-3 h-3 rounded-full ${isSynced ? 'bg-green-500' : 'bg-yellow-400 animate-pulse'}`} />
-           <span className="font-semibold text-gray-700">My Jamboard</span>
-        </div>
-        <div className="flex items-center gap-1 text-xs text-gray-500 font-medium bg-gray-100 px-2 py-1 rounded-md"><Users size={14} /> Live</div>
-      </div>
+
     </div>
   );
 }
